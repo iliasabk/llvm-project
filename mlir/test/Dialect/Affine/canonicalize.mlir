@@ -2653,3 +2653,21 @@ func.func @compose_into_access_keeps_alignment(%memref: memref<100xi32>, %i: ind
   affine.store %val, %memref[%idx] { alignment = 16 } : memref<100xi32>
   return
 }
+
+// -----
+
+// Test that constant affine expressions whose int64 coefficients overflow do
+// not crash the expression folder or the affine expression flattener; they
+// are left unsimplified.
+
+// CHECK-LABEL: func @affine_expr_coeff_overflow
+// CHECK-BOTTOM-UP-LABEL: func @affine_expr_coeff_overflow
+func.func @affine_expr_coeff_overflow() -> (index, index) {
+  // CHECK: affine.apply affine_map<() -> (9223372036854775807 + 1)>()
+  // CHECK-BOTTOM-UP: affine.apply affine_map<() -> (9223372036854775807 + 1)>()
+  %0 = affine.apply affine_map<() -> (9223372036854775807 + 1)>()
+  // CHECK: affine.apply affine_map<() -> (4611686018427387904 * 4)>()
+  // CHECK-BOTTOM-UP: affine.apply affine_map<() -> (4611686018427387904 * 4)>()
+  %1 = affine.apply affine_map<() -> (4611686018427387904 * 4)>()
+  return %0, %1 : index, index
+}

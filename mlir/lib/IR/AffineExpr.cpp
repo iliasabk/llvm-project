@@ -1330,6 +1330,12 @@ SimpleAffineExprFlattener::SimpleAffineExprFlattener(unsigned numDims,
   operandExprStack.reserve(8);
 }
 
+/// Return the magnitude of `v` as an unsigned integer. Unlike `std::abs`, this
+/// is also well-defined for INT64_MIN.
+static uint64_t magnitudeOf(int64_t v) {
+  return v < 0 ? -static_cast<uint64_t>(v) : static_cast<uint64_t>(v);
+}
+
 // In pure affine t = expr * c, we multiply each coefficient of lhs with c.
 //
 // In case of semi affine multiplication expressions, t = expr * symbolic_expr,
@@ -1357,7 +1363,8 @@ LogicalResult SimpleAffineExprFlattener::visitMulExpr(AffineBinaryOpExpr expr) {
   // Get the RHS constant.
   int64_t rhsConst = rhs[getConstantIndex()];
   for (int64_t &lhsElt : lhs)
-    lhsElt *= rhsConst;
+    if (llvm::MulOverflow(lhsElt, rhsConst, lhsElt))
+      return failure();
 
   return success();
 }
@@ -1367,9 +1374,12 @@ LogicalResult SimpleAffineExprFlattener::visitAddExpr(AffineBinaryOpExpr expr) {
   const auto &rhs = operandExprStack.back();
   auto &lhs = operandExprStack[operandExprStack.size() - 2];
   assert(lhs.size() == rhs.size());
-  // Update the LHS in place.
+  // Update the LHS in place. The flat form cannot represent results whose
+  // coefficients overflow int64_t; bail out and leave the expression
+  // unsimplified in that case.
   for (unsigned i = 0, e = rhs.size(); i < e; i++) {
-    lhs[i] += rhs[i];
+    if (llvm::AddOverflow(lhs[i], rhs[i], lhs[i]))
+      return failure();
   }
   // Pop off the RHS.
   operandExprStack.pop_back();
@@ -1428,7 +1438,7 @@ LogicalResult SimpleAffineExprFlattener::visitModExpr(AffineBinaryOpExpr expr) {
   SmallVector<int64_t, 8> floorDividend(lhs);
   uint64_t gcd = rhsConst;
   for (int64_t lhsElt : lhs)
-    gcd = std::gcd(gcd, (uint64_t)std::abs(lhsElt));
+    gcd = std::gcd(gcd, magnitudeOf(lhsElt));
   // Simplify the numerator and the denominator.
   if (gcd != 1) {
     for (int64_t &floorDividendElt : floorDividend)
@@ -1449,7 +1459,9 @@ LogicalResult SimpleAffineExprFlattener::visitModExpr(AffineBinaryOpExpr expr) {
     lhs[getLocalVarStartIndex() + numLocals - 1] = -rhsConst;
   } else {
     // Reuse the existing local id.
-    lhs[getLocalVarStartIndex() + loc] -= rhsConst;
+    int64_t &coef = lhs[getLocalVarStartIndex() + loc];
+    if (llvm::SubOverflow(coef, rhsConst, coef))
+      return failure();
   }
   return success();
 }
@@ -1548,9 +1560,9 @@ LogicalResult SimpleAffineExprFlattener::visitDivExpr(AffineBinaryOpExpr expr,
 
   // Simplify the floordiv, ceildiv if possible by canceling out the greatest
   // common divisors of the numerator and denominator.
-  uint64_t gcd = std::abs(rhsConst);
+  uint64_t gcd = magnitudeOf(rhsConst);
   for (int64_t lhsElt : lhs)
-    gcd = std::gcd(gcd, (uint64_t)std::abs(lhsElt));
+    gcd = std::gcd(gcd, magnitudeOf(lhsElt));
   // Simplify the numerator and the denominator.
   if (gcd != 1) {
     for (int64_t &lhsElt : lhs)
@@ -1579,7 +1591,8 @@ LogicalResult SimpleAffineExprFlattener::visitDivExpr(AffineBinaryOpExpr expr,
     } else {
       // lhs ceildiv c <=>  (lhs + c - 1) floordiv c
       SmallVector<int64_t, 8> dividend(lhs);
-      dividend.back() += divisor - 1;
+      if (llvm::AddOverflow(dividend.back(), divisor - 1, dividend.back()))
+        return failure();
       addLocalFloorDivId(dividend, divisor, divExpr);
     }
   }
@@ -1727,15 +1740,22 @@ std::optional<int64_t> mlir::getBoundForAffineExpr(
       auto &constBound = isUpper ? constUpperBounds[i] : constLowerBounds[i];
       if (!constBound)
         return std::nullopt;
-      bound += *constBound * flattenedExpr[i];
+      int64_t term;
+      if (llvm::MulOverflow(*constBound, flattenedExpr[i], term) ||
+          llvm::AddOverflow(bound, term, bound))
+        return std::nullopt;
     } else if (flattenedExpr[i] < 0) {
       auto &constBound = isUpper ? constLowerBounds[i] : constUpperBounds[i];
       if (!constBound)
         return std::nullopt;
-      bound += *constBound * flattenedExpr[i];
+      int64_t term;
+      if (llvm::MulOverflow(*constBound, flattenedExpr[i], term) ||
+          llvm::AddOverflow(bound, term, bound))
+        return std::nullopt;
     }
   }
   // Constant term.
-  bound += flattenedExpr.back();
+  if (llvm::AddOverflow(bound, flattenedExpr.back(), bound))
+    return std::nullopt;
   return bound;
 }
