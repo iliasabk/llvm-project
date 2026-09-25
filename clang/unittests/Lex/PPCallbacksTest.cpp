@@ -638,4 +638,18 @@ TEST_F(PPCallbacksTest, DirectiveExprRanges) {
       "defined(FLOOFY) || defined(FLUZZY)");
 }
 
+// A malformed #if expression whose evaluation already observed an undefined
+// identifier via 'defined' ends at eod; single-file-parse mode must not try
+// to discard past the end of the directive and run into EOF (crash).
+// https://github.com/llvm/llvm-project/issues/226555
+TEST_F(PPCallbacksTest, DirectiveExprRangeMalformedIfSingleFileParse) {
+  PreprocessorOptions PPOptsSingleFileParse;
+  PPOptsSingleFileParse.SingleFileParseMode = true;
+  const auto &Results = DirectiveExprRange(
+      "#if (defined(FLOOFY)\n&& defined(FLUZZY))\n\n#endif\n",
+      PPOptsSingleFileParse);
+  EXPECT_EQ(Results.size(), 1U);
+  EXPECT_EQ(Results[0].ConditionValue, PPCallbacks::CVK_False);
+}
+
 } // namespace
