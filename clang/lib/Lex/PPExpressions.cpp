@@ -601,7 +601,11 @@ static bool EvaluateDirectiveSubExpr(PPValue &LHS, unsigned MinPrec,
     // identifier is undefined. If we've already seen one, there's no point in
     // continuing with the rest of the expression. Besides saving work, this
     // also prevents calling undefined function-like macros.
-    PP.DiscardUntilEndOfDirective(PeekTok);
+    // If we're already at the end of the directive there is nothing to
+    // discard; discarding would consume tokens from subsequent lines and run
+    // into EOF, which crashes (e.g. `#if (defined(FOO)` with FOO undefined).
+    if (PeekTok.isNot(tok::eod) && PeekTok.isNot(tok::eof))
+      PP.DiscardUntilEndOfDirective(PeekTok);
     return true;
   }
 
